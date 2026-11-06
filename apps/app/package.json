@@ -1,0 +1,27 @@
+{
+  "name": "@da/app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "cf-types": "wrangler types --include-env=false src/runtime.d.ts"
+  },
+  "dependencies": {
+    "hono": "^4.13.14",
+    "jose": "^6.1.0",
+    "@noble/hashes": "^2.0.0",
+    "drizzle-orm": "^0.45.4",
+    "zod": "^4.1.0",
+    "@sentry/cloudflare": "^10.0.0",
+    "@da/shared": "workspace:*",
+    "@da/crypto": "workspace:*",
+    "@da/db": "workspace:*",
+    "@da/providers": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^5.0.5",
+    "@cloudflare/vitest-plugin": "^1.4.10"
+  }
+}

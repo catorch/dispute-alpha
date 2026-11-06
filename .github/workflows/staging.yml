@@ -1,0 +1,83 @@
+name: Staging
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: staging
+  cancel-in-progress: false # never interrupt a migration or deploy
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash # -eo pipefail
+
+env:
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+jobs:
+  deploy:
+    # Off until the Cloudflare account and secrets exist: set the repository variable
+    # STAGING_DEPLOY_ENABLED=true (Settings > Secrets and variables > Actions > Variables).
+    if: vars.STAGING_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      # Migrations first: they are backward compatible with the running Worker (R20.2).
+      - name: Apply D1 migrations (staging)
+        run: pnpm exec wrangler d1 migrations apply DB --remote -c apps/app/wrangler.jsonc --env staging
+
+      # da-jobs first: da-app binds its Workflows and queues.
+      - name: Deploy da-jobs-staging
+        run: pnpm exec wrangler deploy -c apps/jobs/wrangler.jsonc --env staging
+      - name: Deploy da-app-staging
+        run: pnpm exec wrangler deploy -c apps/app/wrangler.jsonc --env staging
+
+  smoke:
+    needs: deploy
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 15
+    env:
+      BASE_URL: ${{ vars.STAGING_URL }}
+      CF_ACCESS_CLIENT_ID: ${{ secrets.STAGING_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.STAGING_ACCESS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Health through Access (service token)
+        run: |
+          curl -sf --retry 5 --retry-delay 5 --retry-all-errors \
+            -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+            "$BASE_URL/api/v1/health"
+      - run: pnpm exec playwright install --with-deps chromium
+      # playwright.config must send CF_ACCESS_CLIENT_ID/SECRET as extraHTTPHeaders and use BASE_URL.
+      - run: pnpm e2e --grep @smoke
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-staging
+          path: playwright-report/
+          retention-days: 14

@@ -1,0 +1,51 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash # -eo pipefail
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4 # version from package.json "packageManager"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint # biome + check-scoped-queries + check-migrations
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build # apps/web/dist, needed by da-app's assets binding
+      # No Cloudflare credentials needed: dry-run only bundles and validates config.
+      - run: pnpm exec wrangler deploy --dry-run -c apps/jobs/wrangler.jsonc
+      - run: pnpm exec wrangler deploy --dry-run -c apps/app/wrangler.jsonc
+      - run: pnpm exec wrangler deploy --dry-run -c apps/jobs/wrangler.jsonc --env staging
+      - run: pnpm exec wrangler deploy --dry-run -c apps/app/wrangler.jsonc --env staging
+
+  clamav:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build -t da-clamav:ci containers/clamav
+      - run: docker run -d --name clamav -p 8080:8080 da-clamav:ci
+      - run: sh containers/clamav/smoke.sh http://localhost:8080
+      - if: failure()
+        run: docker logs clamav

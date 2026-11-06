@@ -1,0 +1,136 @@
+// da-jobs: queue consumers, Workflows, cron triggers, Browser Run, ClamAV container, email.
+// Deploy before da-app: da-app's workflow bindings point at this script.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "da-jobs",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "upload_source_maps": true,
+  "observability": { "enabled": true },
+  // Local dev skips the ClamAV container (EICAR stand-in scanner). Set true plus SCANNER=container in .dev.vars to use Docker.
+  "dev": { "enable_containers": false },
+
+  "d1_databases": [{ "binding": "DB", "database_name": "da-prod", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "../../migrations" }],
+  "r2_buckets": [
+    { "binding": "DOCS", "bucket_name": "da-documents" },
+    { "binding": "QUARANTINE", "bucket_name": "da-quarantine" },
+    { "binding": "LETTERS", "bucket_name": "da-letters" },
+    { "binding": "REPORTS_RAW", "bucket_name": "da-reports-raw" },
+    { "binding": "BACKUPS", "bucket_name": "da-backups" }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "Q_NOTIFY", "queue": "notifications" },
+      { "binding": "Q_PDF", "queue": "pdf-render" }
+    ],
+    "consumers": [
+      { "queue": "notifications", "max_batch_size": 10, "max_retries": 5, "dead_letter_queue": "notifications-dlq", "max_concurrency": 10 },
+      // Browser Run concurrency is limited: small batches share one browser session.
+      { "queue": "pdf-render", "max_batch_size": 5, "max_batch_timeout": 5, "max_retries": 3, "dead_letter_queue": "pdf-render-dlq", "max_concurrency": 2 },
+      { "queue": "doc-scan", "max_batch_size": 5, "max_retries": 3, "dead_letter_queue": "doc-scan-dlq", "max_concurrency": 4 },
+      { "queue": "audit-export", "max_batch_size": 1, "max_retries": 3, "dead_letter_queue": "audit-export-dlq", "max_concurrency": 1 },
+      { "queue": "notifications-dlq", "max_batch_size": 10 },
+      { "queue": "pdf-render-dlq", "max_batch_size": 10 },
+      { "queue": "doc-scan-dlq", "max_batch_size": 10 },
+      { "queue": "audit-export-dlq", "max_batch_size": 10 }
+    ]
+  },
+  "workflows": [
+    { "binding": "WF_IMPORT", "name": "report-import", "class_name": "ReportImportWorkflow" },
+    { "binding": "WF_LETTER", "name": "letter-pipeline", "class_name": "LetterPipelineWorkflow" },
+    { "binding": "WF_DEADLINE", "name": "dispute-deadline", "class_name": "DisputeDeadlineWorkflow" }
+  ],
+  "browser": { "binding": "BROWSER" },
+  "containers": [{ "class_name": "ClamAvContainer", "image": "../../containers/clamav/Dockerfile", "max_instances": 2 }],
+  "durable_objects": { "bindings": [{ "name": "CLAMAV", "class_name": "ClamAvContainer" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ClamAvContainer"] }],
+  "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["no-reply@notify.example.com"] }],
+  "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "da_metrics" }],
+  "secrets_store_secrets": [
+    { "binding": "ENC_KEY_V1", "store_id": "<secrets-store-id>", "secret_name": "enc-key-v1" },
+    { "binding": "HMAC_KEY", "store_id": "<secrets-store-id>", "secret_name": "hmac-key" },
+    { "binding": "POSTMARK_TOKEN", "store_id": "<secrets-store-id>", "secret_name": "postmark-token" },
+    { "binding": "TWILIO_AUTH_TOKEN", "store_id": "<secrets-store-id>", "secret_name": "twilio-auth-token" },
+    { "binding": "CF_API_TOKEN", "store_id": "<secrets-store-id>", "secret_name": "d1-export-api-token" },
+    { "binding": "SLACK_WEBHOOK_URL", "store_id": "<secrets-store-id>", "secret_name": "slack-webhook-url" }
+  ],
+  // UTC: 11:00 = 06:00 Panama / US Eastern Standard.
+  "triggers": { "crons": ["0 11 * * *", "0 8 * * *", "0 9 * * 1", "0 10 1 * *", "*/15 * * * *"] },
+  "vars": {
+    "APP_ENV": "production",
+    "PUBLIC_URL": "https://app.example.com",
+    "ENC_KEY_CURRENT": "1",
+    "EMAIL_PROVIDER": "cloudflare",
+    "MAIL_FROM": "no-reply@notify.example.com",
+    "CREDIT_PROVIDER": "fake",
+    "TWILIO_ACCOUNT_SID": "",
+    "TWILIO_FROM": "",
+    "OPS_ALERT_EMAIL": "ops@example.com",
+    "CF_ACCOUNT_ID": "<account-id>",
+    "D1_DATABASE_ID": "00000000-0000-0000-0000-000000000000",
+    "SENTRY_DSN": ""
+  },
+
+  "env": {
+    "staging": {
+      "name": "da-jobs-staging",
+      "d1_databases": [{ "binding": "DB", "database_name": "da-staging", "database_id": "00000000-0000-0000-0000-000000000001", "migrations_dir": "../../migrations" }],
+      "r2_buckets": [
+        { "binding": "DOCS", "bucket_name": "da-staging-documents" },
+        { "binding": "QUARANTINE", "bucket_name": "da-staging-quarantine" },
+        { "binding": "LETTERS", "bucket_name": "da-staging-letters" },
+        { "binding": "REPORTS_RAW", "bucket_name": "da-staging-reports-raw" },
+        { "binding": "BACKUPS", "bucket_name": "da-staging-backups" }
+      ],
+      "queues": {
+        "producers": [
+          { "binding": "Q_NOTIFY", "queue": "staging-notifications" },
+          { "binding": "Q_PDF", "queue": "staging-pdf-render" }
+        ],
+        "consumers": [
+          { "queue": "staging-notifications", "max_batch_size": 10, "max_retries": 5, "dead_letter_queue": "staging-notifications-dlq" },
+          { "queue": "staging-pdf-render", "max_batch_size": 5, "max_retries": 3, "dead_letter_queue": "staging-pdf-render-dlq", "max_concurrency": 1 },
+          { "queue": "staging-doc-scan", "max_batch_size": 5, "max_retries": 3, "dead_letter_queue": "staging-doc-scan-dlq" },
+          { "queue": "staging-audit-export", "max_batch_size": 1, "max_retries": 3, "dead_letter_queue": "staging-audit-export-dlq" },
+          { "queue": "staging-notifications-dlq" },
+          { "queue": "staging-pdf-render-dlq" },
+          { "queue": "staging-doc-scan-dlq" },
+          { "queue": "staging-audit-export-dlq" }
+        ]
+      },
+      "workflows": [
+        { "binding": "WF_IMPORT", "name": "staging-report-import", "class_name": "ReportImportWorkflow" },
+        { "binding": "WF_LETTER", "name": "staging-letter-pipeline", "class_name": "LetterPipelineWorkflow" },
+        { "binding": "WF_DEADLINE", "name": "staging-dispute-deadline", "class_name": "DisputeDeadlineWorkflow" }
+      ],
+      "browser": { "binding": "BROWSER" },
+      "containers": [{ "class_name": "ClamAvContainer", "image": "../../containers/clamav/Dockerfile", "max_instances": 1 }],
+      "durable_objects": { "bindings": [{ "name": "CLAMAV", "class_name": "ClamAvContainer" }] },
+      "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["no-reply@notify.example.com"] }],
+      "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "da_metrics_staging" }],
+      "secrets_store_secrets": [
+        { "binding": "ENC_KEY_V1", "store_id": "<secrets-store-id>", "secret_name": "staging-enc-key-v1" },
+        { "binding": "HMAC_KEY", "store_id": "<secrets-store-id>", "secret_name": "staging-hmac-key" },
+        { "binding": "CF_API_TOKEN", "store_id": "<secrets-store-id>", "secret_name": "staging-d1-export-api-token" }
+      ],
+      "triggers": { "crons": ["0 11 * * *", "0 8 * * *", "0 9 * * 1", "0 10 1 * *", "*/15 * * * *"] },
+      "vars": {
+        "APP_ENV": "staging",
+        "PUBLIC_URL": "https://staging.example.com",
+        "ENC_KEY_CURRENT": "1",
+        "EMAIL_PROVIDER": "cloudflare",
+        "TWILIO_ACCOUNT_SID": "",
+        "TWILIO_FROM": "",
+        "MAIL_FROM": "no-reply@notify.example.com",
+        "CREDIT_PROVIDER": "fake",
+        "OPS_ALERT_EMAIL": "ops@example.com",
+        "CF_ACCOUNT_ID": "<account-id>",
+        "D1_DATABASE_ID": "00000000-0000-0000-0000-000000000001",
+        "SENTRY_DSN": ""
+      }
+    }
+  }
+}

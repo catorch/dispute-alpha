@@ -1,0 +1,5 @@
+# Copied to .dev.vars by scripts/dev-setup.sh. Overrides wrangler.jsonc vars for `wrangler dev` only.
+APP_ENV=local
+PUBLIC_URL=http://localhost:5173
+EMAIL_PROVIDER=memory
+OPS_ALERT_EMAIL=

@@ -1,0 +1,22 @@
+account_id           = "0123456789abcdef0123456789abcdef"
+zone_id              = "0123456789abcdef0123456789abcdef"
+zone_name            = "clientdomain.com"
+app_hostname         = "app.clientdomain.com"
+staging_hostname     = "staging.clientdomain.com"
+identity_provider_id = "00000000-0000-0000-0000-000000000000"
+staff_email_domain   = "clientdomain.com"
+staff_emails         = []
+
+waf_mode               = "log" # switch to "block" after one week (runbook)
+webhook_ip_ranges      = []    # fill from vendor docs (task 23.2)
+us_only_auth_challenge = false
+hsts_preload           = false
+
+dmarc_policy = "none"
+dmarc_rua    = ""
+dkim_records = {
+  # "cf2024-1._domainkey.notify.clientdomain.com" = { type = "TXT", content = "v=DKIM1; h=sha256; k=rsa; p=..." }
+}
+
+r2_location     = "enam"
+r2_jurisdiction = "default" # "us" if US-only residency is confirmed (D4), before first apply

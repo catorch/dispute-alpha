@@ -1,0 +1,167 @@
+name: Release
+
+# Manual production release (spec §16, R24.3/R24.4). The `production` GitHub environment must have
+# required reviewers configured, so every job below waits for approval before touching prod.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "release, or rollback (see docs/runbook.md)"
+        type: choice
+        options: [release, rollback]
+        default: release
+      rollback_version_id:
+        description: "rollback: da-app version ID to return to (empty = previous version)"
+        type: string
+        default: ""
+      restore_d1_bookmark:
+        description: "rollback: D1 Time Travel bookmark to restore da-prod to (empty = no D1 restore). DESTRUCTIVE."
+        type: string
+        default: ""
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash # -eo pipefail
+
+env:
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+jobs:
+  release:
+    if: inputs.action == 'release'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.PROD_URL }}
+    timeout-minutes: 45
+    env:
+      BASE_URL: ${{ vars.PROD_URL }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: Record D1 Time Travel bookmark (R21.4)
+        id: bookmark
+        run: |
+          pnpm exec wrangler d1 time-travel info da-prod --json | tee d1-bookmark.json
+          BOOKMARK=$(jq -r '.bookmark' d1-bookmark.json)
+          test -n "$BOOKMARK" && test "$BOOKMARK" != null
+          echo "bookmark=$BOOKMARK" >> "$GITHUB_OUTPUT"
+          echo "### D1 pre-release bookmark: \`$BOOKMARK\`" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: d1-bookmark-${{ github.run_id }}
+          path: d1-bookmark.json
+          retention-days: 90
+
+      - name: Record current da-app version (for automatic traffic revert)
+        id: current
+        run: |
+          pnpm exec wrangler deployments status -c apps/app/wrangler.jsonc --json | tee deployment.json
+          OLD=$(jq -r '.versions | max_by(.percentage) | .version_id' deployment.json)
+          test -n "$OLD" && test "$OLD" != null
+          echo "version=$OLD" >> "$GITHUB_OUTPUT"
+          echo "Previous da-app version: \`$OLD\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Apply D1 migrations (production)
+        run: pnpm exec wrangler d1 migrations apply DB --remote -c apps/app/wrangler.jsonc
+
+      - name: Deploy da-jobs
+        run: pnpm exec wrangler deploy -c apps/jobs/wrangler.jsonc
+
+      - name: Upload da-app version
+        id: upload
+        env:
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.ndjson
+        run: |
+          pnpm exec wrangler versions upload -c apps/app/wrangler.jsonc --tag "${GITHUB_SHA::12}" --message "release run ${{ github.run_id }}" | tee upload.log
+          NEW=$(jq -r 'select(.type == "version-upload") | .version_id' "$WRANGLER_OUTPUT_FILE_PATH" 2>/dev/null | tail -1)
+          [ -n "$NEW" ] || NEW=$(grep -oE 'Worker Version ID: [0-9a-f-]+' upload.log | awk '{print $4}' | tail -1)
+          test -n "$NEW"
+          echo "version=$NEW" >> "$GITHUB_OUTPUT"
+          echo "New da-app version: \`$NEW\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Gradual rollout 10%
+        run: >-
+          pnpm exec wrangler versions deploy -c apps/app/wrangler.jsonc -y
+          --message "10% canary, run ${{ github.run_id }}"
+          "${{ steps.upload.outputs.version }}@10%" "${{ steps.current.outputs.version }}@90%"
+
+      # The version-override header pins smoke requests to the new version regardless of the 10% split.
+      - name: Smoke test new version
+        env:
+          PIN: 'Cloudflare-Workers-Version-Overrides: da-app="${{ steps.upload.outputs.version }}"'
+        run: |
+          curl -sf --retry 5 --retry-delay 5 --retry-all-errors -H "$PIN" "$BASE_URL/api/v1/health"
+          curl -sf -o /dev/null -H "$PIN" "$BASE_URL/login"
+          curl -sf -o /dev/null -H "$PIN" "$BASE_URL/portal"
+
+      - name: Promote to 100%
+        run: >-
+          pnpm exec wrangler versions deploy -c apps/app/wrangler.jsonc -y
+          --message "promote, run ${{ github.run_id }}"
+          "${{ steps.upload.outputs.version }}@100%"
+
+      - name: Post-release smoke
+        run: curl -sf --retry 3 --retry-delay 5 "$BASE_URL/api/v1/health"
+
+      - name: Revert traffic to previous version
+        if: failure() && steps.upload.outputs.version != ''
+        run: >-
+          pnpm exec wrangler versions deploy -c apps/app/wrangler.jsonc -y
+          --message "auto-revert, run ${{ github.run_id }}"
+          "${{ steps.current.outputs.version }}@100%"
+      - name: Failure note
+        if: failure()
+        run: |
+          {
+            echo "### Release failed"
+            echo "da-app traffic was returned to \`${{ steps.current.outputs.version }}\` (if the canary had started)."
+            echo "da-jobs and migrations are NOT reverted automatically. If needed, run this workflow with action=rollback"
+            echo "and restore_d1_bookmark=\`${{ steps.bookmark.outputs.bookmark }}\` (see docs/runbook.md)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  rollback:
+    if: inputs.action == 'rollback'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+    env:
+      VERSION_ID: ${{ inputs.rollback_version_id }}
+      BOOKMARK: ${{ inputs.restore_d1_bookmark }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # Code first: the previous Worker version runs fine on the newer (additive) schema.
+      - name: Roll back da-app
+        run: pnpm exec wrangler rollback ${VERSION_ID:+"$VERSION_ID"} -c apps/app/wrangler.jsonc -y -m "rollback run ${{ github.run_id }}"
+      - name: Roll back da-jobs
+        run: pnpm exec wrangler rollback -c apps/jobs/wrangler.jsonc -y -m "rollback run ${{ github.run_id }}"
+
+      # Only when a migration caused the failure. Loses every write since the bookmark.
+      - name: Restore D1 to bookmark
+        if: inputs.restore_d1_bookmark != ''
+        run: pnpm exec wrangler d1 time-travel restore da-prod --bookmark "$BOOKMARK" --json
+
+      - name: Health
+        run: curl -sf --retry 5 --retry-delay 5 --retry-all-errors "${{ vars.PROD_URL }}/api/v1/health"

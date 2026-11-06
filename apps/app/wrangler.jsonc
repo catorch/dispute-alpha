@@ -1,0 +1,116 @@
+// da-app: React SPA (static assets) + Hono API. See docs/cloudflare-deployment-spec.md §14.
+// Bindings are not inherited by named environments, so staging repeats every binding.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "da-app",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "upload_source_maps": true,
+  "observability": { "enabled": true },
+  "assets": {
+    "directory": "../web/dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "routes": [{ "pattern": "app.example.com", "custom_domain": true }],
+
+  "d1_databases": [{ "binding": "DB", "database_name": "da-prod", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "../../migrations" }],
+  "r2_buckets": [
+    { "binding": "DOCS", "bucket_name": "da-documents" },
+    { "binding": "QUARANTINE", "bucket_name": "da-quarantine" },
+    { "binding": "LETTERS", "bucket_name": "da-letters" },
+    { "binding": "REPORTS_RAW", "bucket_name": "da-reports-raw" }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "Q_NOTIFY", "queue": "notifications" },
+      { "binding": "Q_SCAN", "queue": "doc-scan" },
+      { "binding": "Q_AUDIT_EXPORT", "queue": "audit-export" }
+    ]
+  },
+  "workflows": [
+    { "binding": "WF_IMPORT", "name": "report-import", "class_name": "ReportImportWorkflow", "script_name": "da-jobs" },
+    { "binding": "WF_LETTER", "name": "letter-pipeline", "class_name": "LetterPipelineWorkflow", "script_name": "da-jobs" },
+    { "binding": "WF_DEADLINE", "name": "dispute-deadline", "class_name": "DisputeDeadlineWorkflow", "script_name": "da-jobs" }
+  ],
+  "durable_objects": { "bindings": [{ "name": "CLIENT_LOCK", "class_name": "ClientLock" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ClientLock"] }],
+  "secrets_store_secrets": [
+    { "binding": "ENC_KEY_V1", "store_id": "<secrets-store-id>", "secret_name": "enc-key-v1" },
+    { "binding": "HMAC_KEY", "store_id": "<secrets-store-id>", "secret_name": "hmac-key" },
+    { "binding": "TURNSTILE_SECRET", "store_id": "<secrets-store-id>", "secret_name": "turnstile-secret" },
+    { "binding": "ESIGN_API_KEY", "store_id": "<secrets-store-id>", "secret_name": "esign-api-key" },
+    { "binding": "CREDIT_WEBHOOK_SECRET", "store_id": "<secrets-store-id>", "secret_name": "credit-webhook-secret" },
+    { "binding": "TWILIO_AUTH_TOKEN", "store_id": "<secrets-store-id>", "secret_name": "twilio-auth-token" }
+  ],
+  // Workers rate limits support 10 s or 60 s periods only.
+  "ratelimits": [
+    { "name": "AUTH_LIMIT", "namespace_id": "1001", "simple": { "limit": 5, "period": 60 } },
+    { "name": "IMPORT_LIMIT", "namespace_id": "1002", "simple": { "limit": 3, "period": 60 } }
+  ],
+  "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "da_metrics" }],
+  "vars": {
+    "APP_ENV": "production",
+    "PUBLIC_URL": "https://app.example.com",
+    "ACCESS_TEAM_DOMAIN": "<team>.cloudflareaccess.com",
+    "ACCESS_AUD": "<access-application-aud-tag>",
+    "ENC_KEY_CURRENT": "1",
+    "CREDIT_PROVIDER": "fake",
+    "ESIGN_PROVIDER": "dropbox_sign",
+    "ESIGN_TEMPLATE_ID": "<dropbox-sign-template-id>",
+    "SENTRY_DSN": ""
+  },
+
+  "env": {
+    "staging": {
+      "name": "da-app-staging",
+      "routes": [{ "pattern": "staging.example.com", "custom_domain": true }],
+      "d1_databases": [{ "binding": "DB", "database_name": "da-staging", "database_id": "00000000-0000-0000-0000-000000000001", "migrations_dir": "../../migrations" }],
+      "r2_buckets": [
+        { "binding": "DOCS", "bucket_name": "da-staging-documents" },
+        { "binding": "QUARANTINE", "bucket_name": "da-staging-quarantine" },
+        { "binding": "LETTERS", "bucket_name": "da-staging-letters" },
+        { "binding": "REPORTS_RAW", "bucket_name": "da-staging-reports-raw" }
+      ],
+      "queues": {
+        "producers": [
+          { "binding": "Q_NOTIFY", "queue": "staging-notifications" },
+          { "binding": "Q_SCAN", "queue": "staging-doc-scan" },
+          { "binding": "Q_AUDIT_EXPORT", "queue": "staging-audit-export" }
+        ]
+      },
+      "workflows": [
+        { "binding": "WF_IMPORT", "name": "staging-report-import", "class_name": "ReportImportWorkflow", "script_name": "da-jobs-staging" },
+        { "binding": "WF_LETTER", "name": "staging-letter-pipeline", "class_name": "LetterPipelineWorkflow", "script_name": "da-jobs-staging" },
+        { "binding": "WF_DEADLINE", "name": "staging-dispute-deadline", "class_name": "DisputeDeadlineWorkflow", "script_name": "da-jobs-staging" }
+      ],
+      "durable_objects": { "bindings": [{ "name": "CLIENT_LOCK", "class_name": "ClientLock" }] },
+      "secrets_store_secrets": [
+        { "binding": "ENC_KEY_V1", "store_id": "<secrets-store-id>", "secret_name": "staging-enc-key-v1" },
+        { "binding": "HMAC_KEY", "store_id": "<secrets-store-id>", "secret_name": "staging-hmac-key" },
+        { "binding": "TURNSTILE_SECRET", "store_id": "<secrets-store-id>", "secret_name": "staging-turnstile-secret" },
+        { "binding": "ESIGN_WEBHOOK_SECRET", "store_id": "<secrets-store-id>", "secret_name": "staging-esign-webhook-secret" },
+        { "binding": "CREDIT_WEBHOOK_SECRET", "store_id": "<secrets-store-id>", "secret_name": "staging-credit-webhook-secret" }
+      ],
+      "ratelimits": [
+        { "name": "AUTH_LIMIT", "namespace_id": "2001", "simple": { "limit": 5, "period": 60 } },
+        { "name": "IMPORT_LIMIT", "namespace_id": "2002", "simple": { "limit": 3, "period": 60 } }
+      ],
+      "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "da_metrics_staging" }],
+      "vars": {
+        "APP_ENV": "staging",
+        "PUBLIC_URL": "https://staging.example.com",
+        "ACCESS_TEAM_DOMAIN": "<team>.cloudflareaccess.com",
+        "ACCESS_AUD": "<staging-access-aud-tag>",
+        "ENC_KEY_CURRENT": "1",
+        "CREDIT_PROVIDER": "fake",
+        "ESIGN_PROVIDER": "fake",
+        "ESIGN_TEMPLATE_ID": "",
+        "SENTRY_DSN": ""
+      }
+    }
+  }
+}
